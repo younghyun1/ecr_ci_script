@@ -13,15 +13,13 @@ fn execute_command(command: &str, show_command: bool, alt_command: Option<String
             "{}",
             format!("Executing command: {}", command).blue().bold()
         );
-    } else {
-        if alt_command.is_some() {
-            println!(
-                "{}",
-                format!("Executing command: {}", alt_command.unwrap())
-                    .blue()
-                    .bold()
-            );
-        }
+    } else if alt_command.is_some() {
+        println!(
+            "{}",
+            format!("Executing command: {}", alt_command.unwrap())
+                .blue()
+                .bold()
+        );
     }
     let output = Command::new("sh")
         .arg("-c")
