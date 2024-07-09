@@ -165,12 +165,19 @@ async fn register_new_task_definition(
     client: &ECSClient,
     task_def: TaskDefinition,
     new_image: &str,
+    cpu_architecture: &str,
 ) -> String {
     let mut container_definitions = task_def.container_definitions.clone().unwrap();
 
     for container_def in &mut container_definitions {
         container_def.image = Some(new_image.to_string());
     }
+
+    let cpu_architecture = match cpu_architecture.to_lowercase().as_str() {
+        "arm64" | "arm" => aws_sdk_ecs::types::CpuArchitecture::Arm64,
+        "x86" | "x86_64" | "x8664" | "intel" | "amd" => aws_sdk_ecs::types::CpuArchitecture::X8664,
+        _ => aws_sdk_ecs::types::CpuArchitecture::Arm64,
+    };
 
     let new_task_definition = client
         .register_task_definition()
@@ -187,7 +194,7 @@ async fn register_new_task_definition(
         .set_runtime_platform(Some(
             aws_sdk_ecs::types::RuntimePlatform::builder()
                 .operating_system_family(aws_sdk_ecs::types::OsFamily::Linux)
-                .cpu_architecture(aws_sdk_ecs::types::CpuArchitecture::Arm64)
+                .cpu_architecture(cpu_architecture)
                 .build(),
         ))
         .send()
@@ -213,6 +220,7 @@ async fn update_ecs_service(
         .cluster(cluster)
         .service(service)
         .task_definition(task_definition_arn)
+        .force_new_deployment(true)
         .send()
         .await
         .expect("Error updating ECS service");
@@ -228,6 +236,7 @@ fn main() {
     let cluster_name = std::env::var("CLUSTER_NAME").expect("CLUSTER_NAME must be set");
     let service_name = std::env::var("SERVICE_NAME").expect("SERVICE_NAME must be set");
     let task_family = std::env::var("TASK_FAMILY").expect("TASK_FAMILY must be set");
+    let cpu_architecture = std::env::var("CPU_ARCHITECTURE").expect("CPU_ARCHITECTURE must be set");
 
     println!("{}", "Starting ECR to ECS process...".magenta().bold());
     let rt = Runtime::new().unwrap();
@@ -289,8 +298,13 @@ fn main() {
             .expect("Failed to get latest task definition");
 
         // Register new task definition with the new image
-        let new_task_definition_arn =
-            register_new_task_definition(&ecs_client, latest_task_definition, &new_image).await;
+        let new_task_definition_arn = register_new_task_definition(
+            &ecs_client,
+            latest_task_definition,
+            &new_image,
+            &cpu_architecture,
+        )
+        .await;
 
         // Update ECS service to use the new task definition
         update_ecs_service(
