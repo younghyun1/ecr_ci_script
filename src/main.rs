@@ -184,6 +184,12 @@ async fn register_new_task_definition(
         .set_requires_compatibilities(task_def.requires_compatibilities)
         .set_cpu(task_def.cpu)
         .set_memory(task_def.memory)
+        .set_runtime_platform(Some(
+            aws_sdk_ecs::types::RuntimePlatform::builder()
+                .operating_system_family(aws_sdk_ecs::types::OsFamily::Linux)
+                .cpu_architecture(aws_sdk_ecs::types::CpuArchitecture::Arm64)
+                .build(),
+        ))
         .send()
         .await
         .expect("Error registering new task definition");
