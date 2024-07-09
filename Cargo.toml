@@ -1,5 +1,5 @@
 [package]
-name = "ecr_ci_script"
+name = "ecr-ci-cd-script"
 version = "0.2.0"
 edition = "2021"
 

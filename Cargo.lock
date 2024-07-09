@@ -528,7 +528,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
 
 [[package]]
-name = "ecr_ci_script"
+name = "ecr-ci-cd-script"
 version = "0.2.0"
 dependencies = [
  "aws-config",
