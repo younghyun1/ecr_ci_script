@@ -2,6 +2,8 @@ use std::process::Command;
 use std::str;
 
 use aws_sdk_ecr as ecr;
+use aws_sdk_ecs::types::TaskDefinition;
+use aws_sdk_ecs::Client as ECSClient;
 use aws_types::region::Region;
 use colored::*;
 use regex::Regex;
@@ -136,22 +138,101 @@ async fn get_latest_ecr_image_tags(
     }
 }
 
+async fn get_latest_task_definition(
+    client: &ECSClient,
+    task_family: &String,
+) -> Option<TaskDefinition> {
+    println!(
+        "{}",
+        "Fetching latest ECS task definition...".yellow().bold()
+    );
+    let task_definition = client
+        .describe_task_definition()
+        .task_definition(task_family)
+        .send()
+        .await;
+
+    match task_definition {
+        Ok(response) => response.task_definition,
+        Err(err) => {
+            eprintln!("Error fetching task definition: {:?}", err);
+            None
+        }
+    }
+}
+
+async fn register_new_task_definition(
+    client: &ECSClient,
+    task_def: TaskDefinition,
+    new_image: &str,
+) -> String {
+    let mut container_definitions = task_def.container_definitions.clone().unwrap();
+
+    for container_def in &mut container_definitions {
+        container_def.image = Some(new_image.to_string());
+    }
+
+    let new_task_definition = client
+        .register_task_definition()
+        .set_family(task_def.family)
+        .set_task_role_arn(task_def.task_role_arn)
+        .set_execution_role_arn(task_def.execution_role_arn)
+        .set_network_mode(task_def.network_mode)
+        .set_container_definitions(Some(container_definitions))
+        .set_volumes(task_def.volumes)
+        .set_placement_constraints(task_def.placement_constraints)
+        .set_requires_compatibilities(task_def.requires_compatibilities)
+        .set_cpu(task_def.cpu)
+        .set_memory(task_def.memory)
+        .send()
+        .await
+        .expect("Error registering new task definition");
+
+    new_task_definition
+        .task_definition
+        .expect("No task definition registered")
+        .task_definition_arn
+        .unwrap()
+}
+
+async fn update_ecs_service(
+    client: &ECSClient,
+    cluster: &str,
+    service: &str,
+    task_definition_arn: &str,
+) {
+    println!("{}", "Updating ECS service...".yellow().bold());
+    let _ = client
+        .update_service()
+        .cluster(cluster)
+        .service(service)
+        .task_definition(task_definition_arn)
+        .send()
+        .await
+        .expect("Error updating ECS service");
+    println!("{}", "ECS service updated.".yellow().bold());
+}
+
 fn main() {
     dotenvy::dotenv().ok();
     let region = std::env::var("REGION").expect("REGION must be set");
     let repository = std::env::var("REPOSITORY").expect("REPOSITORY must be set");
     let repository_url = std::env::var("REPOSITORY_URL").expect("REPOSITORY_URL must be set");
     let app_name = std::env::var("APP_NAME").expect("APP_NAME must be set");
+    let cluster_name = std::env::var("CLUSTER_NAME").expect("CLUSTER_NAME must be set");
+    let service_name = std::env::var("SERVICE_NAME").expect("SERVICE_NAME must be set");
+    let task_family = std::env::var("TASK_FAMILY").expect("TASK_FAMILY must be set");
 
-    println!("{}", "Starting ECR image processing...".magenta().bold());
+    println!("{}", "Starting ECR to ECS process...".magenta().bold());
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
         let region = Region::new(region);
-        let config = aws_config::from_env().region(region).load().await;
-        let client = ecr::Client::new(&config);
+        let config = aws_config::from_env().region(region.clone()).load().await;
+        let ecr_client = ecr::Client::new(&config);
+        let ecs_client = ECSClient::new(&config);
 
         // Get AWS ECR login password
-        let login_password = get_ecr_login_password(&client).await;
+        let login_password = get_ecr_login_password(&ecr_client).await;
         let login_command = format!(
             "echo {} | docker login --username AWS --password-stdin {}",
             login_password, repository_url
@@ -166,7 +247,7 @@ fn main() {
 
         // Get the latest image tags from ECR
         let latest_tag: (i32, i32, i32) =
-            match get_latest_ecr_image_tags(&client, &repository).await {
+            match get_latest_ecr_image_tags(&ecr_client, &repository).await {
                 Some(tags) => get_latest_tag(
                     &tags.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
                     &app_name,
@@ -179,24 +260,40 @@ fn main() {
             "{}-{}.{}.{}",
             app_name, new_version.0, new_version.1, new_version.2
         );
+        let new_image = format!("{}:{}", repository_url, new_tag);
 
-        // Build the new image (assuming Dockerfile is present in the current directory)
-        let build_command = format!("docker buildx build -t {}:{} .", repository_url, new_tag);
+        // Build the new Docker image (assuming Dockerfile is present in the current directory)
+        let build_command = format!("docker buildx build -t {} .", new_image);
         execute_command(&build_command, true, None);
 
-        // Push the new tag to the repository
-        let push_command = format!("docker push {}:{}", repository_url, new_tag);
+        // Push the new Docker image to the ECR repository
+        let push_command = format!("docker push {}", new_image);
         execute_command(&push_command, true, None);
 
         println!(
             "{}",
-            format!(
-                "Successfully tagged and pushed {}:{}",
-                repository_url, new_tag
-            )
-            .green()
-            .bold()
+            format!("Successfully tagged and pushed {}", new_image)
+                .green()
+                .bold()
         );
+
+        // Fetch latest task definition
+        let latest_task_definition = get_latest_task_definition(&ecs_client, &task_family)
+            .await
+            .expect("Failed to get latest task definition");
+
+        // Register new task definition with the new image
+        let new_task_definition_arn =
+            register_new_task_definition(&ecs_client, latest_task_definition, &new_image).await;
+
+        // Update ECS service to use the new task definition
+        update_ecs_service(
+            &ecs_client,
+            &cluster_name,
+            &service_name,
+            &new_task_definition_arn,
+        )
+        .await;
     });
-    println!("{}", "ECR image processing completed.".magenta().bold());
+    println!("{}", "ECR to ECS process completed.".magenta().bold());
 }
